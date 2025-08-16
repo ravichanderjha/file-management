@@ -3,8 +3,11 @@ package com.ravichanderjha.file_management.service;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.security.DigestInputStream;
+import java.security.MessageDigest;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -42,10 +45,8 @@ public class FileOrganizerService {
                         String month = String.format("%02d", modifiedTime.getMonthValue());
                         String day = String.format("%02d", modifiedTime.getDayOfMonth());
 
-                        // Construct timestamped file name
+                        // Timestamped name
                         String timestampedName = getTimestampedFilename(file.getFileName().toString(), modifiedTime);
-
-                        // Original path
                         Path targetDir = originalRoot.resolve(Paths.get(fileType, year, month, day));
                         Files.createDirectories(targetDir);
 
@@ -54,19 +55,29 @@ public class FileOrganizerService {
                         if (!Files.exists(targetFile)) {
                             Files.move(file, targetFile);
                         } else {
-                            // Duplicate path
-                            Path duplicateDir = duplicateRoot.resolve(Paths.get(fileType, year, month, day));
-                            Files.createDirectories(duplicateDir);
+                            // Compare checksums
+                            String existingChecksum = computeChecksum(targetFile);
+                            String newFileChecksum = computeChecksum(file);
 
-                            Path duplicateTarget = duplicateDir.resolve(timestampedName);
-                            Path finalDuplicatePath = getUniquePath(duplicateTarget);
-                            Files.move(file, finalDuplicatePath);
+                            if (existingChecksum.equals(newFileChecksum)) {
+                                // Exact duplicate → move to duplicate
+                                Path duplicateDir = duplicateRoot.resolve(Paths.get(fileType, year, month, day));
+                                Files.createDirectories(duplicateDir);
+                                Path duplicateTarget = duplicateDir.resolve(timestampedName);
+                                Path finalDuplicatePath = getUniquePath(duplicateTarget);
+                                Files.move(file, finalDuplicatePath);
+                            } else {
+                                // Same name but different file → rename and save in original
+                                Path renamedTarget = getUniquePath(targetFile);
+                                Files.move(file, renamedTarget);
+                            }
                         }
 
                     } catch (IOException e) {
-                        e.printStackTrace(); // Replace with proper logging
+                        e.printStackTrace(); // Replace with logger in production
                     }
                 });
+        deleteEmptyDirectories(sourcePath, originalRoot, duplicateRoot);
     }
 
     private String getFileExtension(String filename) {
@@ -112,4 +123,46 @@ public class FileOrganizerService {
 
         return newPath;
     }
+
+    private String computeChecksum(Path path) throws IOException {
+        try (InputStream fis = Files.newInputStream(path);
+             DigestInputStream dis = new DigestInputStream(fis, MessageDigest.getInstance("SHA-256"))) {
+
+            byte[] buffer = new byte[8192];
+            while (dis.read(buffer) != -1) {
+                // Reading file through DigestInputStream
+            }
+
+            byte[] digest = dis.getMessageDigest().digest();
+            StringBuilder sb = new StringBuilder();
+            for (byte b : digest) {
+                sb.append(String.format("%02x", b));
+            }
+
+            return sb.toString();
+        } catch (Exception e) {
+            throw new IOException("Failed to compute checksum for " + path, e);
+        }
+    }
+    private void deleteEmptyDirectories(Path root, Path... excludeDirs) throws IOException {
+        Files.walk(root)
+                .sorted((a, b) -> b.getNameCount() - a.getNameCount()) // delete children first
+                .filter(Files::isDirectory)
+                .filter(dir -> {
+                    for (Path exclude : excludeDirs) {
+                        if (dir.equals(exclude)) return false;
+                    }
+                    return true;
+                })
+                .forEach(dir -> {
+                    try (DirectoryStream<Path> entries = Files.newDirectoryStream(dir)) {
+                        if (!entries.iterator().hasNext()) {
+                            Files.delete(dir);
+                        }
+                    } catch (IOException e) {
+                        e.printStackTrace(); // or use a logger
+                    }
+                });
+    }
+
 }
